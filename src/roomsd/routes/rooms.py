@@ -35,6 +35,8 @@ from roomsd.models import (
     MessageCreate,
     MessagesPage,
     Note,
+    NoteChange,
+    NoteChanges,
     NotePut,
     NotesResponse,
     Participant,
@@ -46,6 +48,7 @@ from roomsd.models import (
 )
 
 NOTE_KEY_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+NOTE_HISTORY = 50  # retained revisions per note key (docs#20)
 
 router = APIRouter(prefix="/v1/rooms", tags=["rooms"])
 
@@ -68,6 +71,7 @@ def note_from_row(row: sqlite3.Row) -> Note:
     return Note(
         key=row["key"],
         value=json.loads(row["value_json"]),
+        revision=row["revision"],
         updated_by=row["updated_by"],
         updated_at=row["updated_at"],
     )
@@ -414,18 +418,81 @@ def put_note(
             status.HTTP_413_CONTENT_TOO_LARGE, f"note exceeds {settings.max_note_bytes} bytes"
         )
     with conn:
+        conn.execute("begin immediate")  # check, write, history and audit are one unit
+        current = conn.execute(
+            "select revision from notes where room_id = ? and key = ?", (room_id, key)
+        ).fetchone()
+        current_rev = current["revision"] if current else 0
+        if req.if_revision is not None and req.if_revision != current_rev:
+            raise HTTPException(
+                status.HTTP_412_PRECONDITION_FAILED,
+                f"note {key!r} is at revision {current_rev}, not {req.if_revision};"
+                " re-read, merge, and retry",
+            )
+        revision, now = current_rev + 1, now_iso()
         conn.execute(
-            "insert into notes (room_id, key, value_json, updated_by, updated_at)"
-            " values (?, ?, ?, ?, ?)"
-            " on conflict (room_id, key) do update set value_json = excluded.value_json,"
-            " updated_by = excluded.updated_by, updated_at = excluded.updated_at",
-            (room_id, key, value_json, caller.agent, now_iso()),
+            "insert into notes (room_id, key, revision, value_json, updated_by, updated_at)"
+            " values (?, ?, ?, ?, ?, ?)"
+            " on conflict (room_id, key) do update set revision = excluded.revision,"
+            " value_json = excluded.value_json, updated_by = excluded.updated_by,"
+            " updated_at = excluded.updated_at",
+            (room_id, key, revision, value_json, caller.agent, now),
         )
-        db.audit(conn, caller.agent, "note.put", room_id, key=key, invite_id=caller.invite_id)
-    row = conn.execute(
-        "select * from notes where room_id = ? and key = ?", (room_id, key)
-    ).fetchone()
+        conn.execute(
+            "insert into note_revisions (room_id, key, revision, value_json, updated_by,"
+            " updated_at) values (?, ?, ?, ?, ?, ?)",
+            (room_id, key, revision, value_json, caller.agent, now),
+        )
+        conn.execute(  # bounded history: keep the newest NOTE_HISTORY revisions per key
+            "delete from note_revisions where room_id = ? and key = ? and revision <= ?",
+            (room_id, key, revision - NOTE_HISTORY),
+        )
+        db.audit(
+            conn,
+            caller.agent,
+            "note.put",
+            room_id,
+            key=key,
+            revision=revision,
+            invite_id=caller.invite_id,
+        )
+        row = conn.execute(
+            "select * from notes where room_id = ? and key = ?", (room_id, key)
+        ).fetchone()
     return note_from_row(row)
+
+
+@router.get("/{room_id}/notes/changes")
+def note_changes(
+    room_id: RoomId,
+    conn: Conn,
+    caller: Caller,
+    after: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> NoteChanges:
+    """Note writes in this room, resumable from `after` (docs#20). /v1/me/updates covers
+    messages only, so poll this separately to notice note-only changes. Changes older than
+    the retained history may be missing; the notes themselves always show the latest."""
+    require_right(conn, room_id, caller, "read")
+    rows = conn.execute(
+        "select id, key, revision, updated_by, updated_at from note_revisions"
+        " where room_id = ? and id > ? order by id limit ?",
+        (room_id, after, limit),
+    ).fetchall()
+    changes = [NoteChange(**dict(r)) for r in rows]
+    return NoteChanges(changes=changes, next_cursor=changes[-1].id if changes else after)
+
+
+@router.get("/{room_id}/notes/{key}/history")
+def note_history(room_id: RoomId, key: str, conn: Conn, caller: Caller) -> list[Note]:
+    """Retained revisions of a note, newest first, to recover overwritten values."""
+    require_right(conn, room_id, caller, "read")
+    rows = conn.execute(
+        "select key, revision, value_json, updated_by, updated_at from note_revisions"
+        " where room_id = ? and key = ? order by revision desc",
+        (room_id, key),
+    ).fetchall()
+    return [note_from_row(r) for r in rows]
 
 
 @router.get("/{room_id}/notes")

@@ -54,6 +54,7 @@ create index if not exists messages_room_id_id on messages(room_id, id);
 create table if not exists notes (
   room_id text not null references rooms(id),
   key text not null,
+  revision integer not null default 1,  -- docs#20: monotonic per key
   value_json text not null,
   updated_by text not null,
   updated_at text not null,
@@ -72,6 +73,21 @@ create table if not exists members (
   banned_by text,
   primary key (room_id, agent)
 );
+
+-- docs#20: every note write, kept (bounded per key) for recovery; the id is also the
+-- cursor for resumable note-change discovery.
+create table if not exists note_revisions (
+  id integer primary key autoincrement,
+  room_id text not null references rooms(id),
+  key text not null,
+  revision integer not null,
+  value_json text not null,
+  updated_by text not null,
+  updated_at text not null
+);
+
+create index if not exists note_revisions_room on note_revisions(room_id, id);
+create index if not exists note_revisions_key on note_revisions(room_id, key, revision);
 
 create table if not exists invites (
   invite_id text primary key,
