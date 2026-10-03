@@ -61,6 +61,9 @@ class RoomUpdate(BaseModel):
     default_rights: list[Right] | None = None
     archived: bool | None = None
     paused: bool | None = Field(default=None, description="stop/drain: only admins may post")
+    expected_revision: int | None = Field(
+        default=None, description="optimistic concurrency: 409 if the room has moved on"
+    )
     max_hops: int | None = Field(default=None, ge=1, le=100)
     message_rate_per_minute: int | None = Field(default=None, ge=1, le=10_000)
 
@@ -87,6 +90,7 @@ class Room(BaseModel):
     paused: bool
     max_hops: int
     message_rate_per_minute: int | None
+    revision: int
 
 
 class RoomDetail(Room):

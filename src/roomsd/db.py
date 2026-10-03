@@ -21,6 +21,7 @@ create table if not exists rooms (
   max_hops integer not null default 8,
   message_rate_per_minute integer,
   paused integer not null default 0,
+  revision integer not null default 1,  -- docs#18: bumped on every PATCH
   listed integer not null default 0,
   tags_json text not null default '[]',
   -- lobbyd listing sync: bumped on any listing-relevant change, synced when pushed.
