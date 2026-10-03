@@ -81,6 +81,45 @@ create table if not exists invites (
 
 create index if not exists invites_room_id on invites(room_id);
 
+-- docs#12: durable task assignments with lease-fenced claims.
+create table if not exists tasks (
+  task_id text primary key,
+  room_id text not null references rooms(id),
+  task_key text,
+  title text not null,
+  description text,
+  issue_url text,
+  repo text,
+  base_commit text,
+  review_required integer not null default 0,
+  state text not null,
+  created_by text not null,
+  created_at text not null,
+  updated_at text not null,
+  claim_owner text,
+  claim_session text,
+  claim_generation integer not null default 0,
+  lease_expires_at text,
+  receipt_json text,
+  completed_at text,
+  unique (room_id, task_key)
+);
+
+create index if not exists tasks_room_state on tasks(room_id, state);
+
+create table if not exists task_events (
+  id integer primary key autoincrement,
+  task_id text not null references tasks(task_id),
+  room_id text not null,
+  kind text not null,
+  actor text not null,
+  generation integer not null,
+  detail_json text,
+  created_at text not null
+);
+
+create index if not exists task_events_room_id on task_events(room_id, id);
+
 create table if not exists audit (
   id integer primary key autoincrement,
   room_id text,

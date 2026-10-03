@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from roomsd import db, lobby_client
 from roomsd.config import Settings
 from roomsd.models import WellKnown
-from roomsd.routes import auth, me, rooms
+from roomsd.routes import auth, me, rooms, tasks
 from roomsd.verify import TokenVerifier
 
 VERSION = "0.2.0"
@@ -54,10 +54,11 @@ def create_app(settings: Settings | None = None, verifier: TokenVerifier | None 
             issuer=settings.lobbyd_url,
             domain=settings.lobbyd_domain,
             version=VERSION,
-            features=["invites", "notes", "me.updates", "listing"],
+            features=["invites", "notes", "me.updates", "listing", "admission", "tasks"],
         )
 
     app.include_router(auth.router)
     app.include_router(me.router)
     app.include_router(rooms.router)
+    app.include_router(tasks.router)
     return app
