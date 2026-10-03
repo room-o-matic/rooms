@@ -11,6 +11,9 @@ class Settings:
     server_id: str = "rooms-local"
     base_url: str = "http://127.0.0.1:8766"
     tags: tuple[str, ...] = ()
+    # docs#10: admission for rooms created without an explicit one. "open" suits a trusted
+    # single operator; public deployments should use "closed".
+    default_admission: str = "open"
 
     # lobbyd: the issuer whose access tokens this server accepts.
     lobbyd_url: str = "http://127.0.0.1:8767"
@@ -45,6 +48,7 @@ class Settings:
             server_id=env("ROOMSD_SERVER_ID", cls.server_id),
             base_url=env("ROOMSD_BASE_URL", cls.base_url).rstrip("/"),
             tags=tuple(t for t in env("ROOMSD_TAGS", "").split(",") if t),
+            default_admission=env("ROOMSD_DEFAULT_ADMISSION", cls.default_admission),
             lobbyd_url=env("LOBBYD_URL", cls.lobbyd_url).rstrip("/"),
             lobbyd_domain=env("LOBBYD_DOMAIN", cls.lobbyd_domain),
             lobbyd_jwks_url=env("LOBBYD_JWKS_URL"),

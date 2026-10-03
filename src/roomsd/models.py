@@ -22,6 +22,8 @@ PAYLOAD_FIELDS = ("confidence", "reply_requested", "severity", "based_on_message
 
 
 Tags = list[str]
+Right = Literal["read", "write", "invite", "admin"]
+Admission = Literal["open", "closed"]
 
 
 class RoomCreate(BaseModel):
@@ -30,6 +32,10 @@ class RoomCreate(BaseModel):
     created_by: str | None = None
     listed: bool = Field(default=False, description="publish name/purpose to the lobbyd directory")
     tags: Tags = Field(default_factory=list, max_length=32)
+    admission: Admission | None = Field(default=None, description="default: server setting")
+    default_rights: list[Right] | None = Field(
+        default=None, description="rights for self-joiners of an open room"
+    )
 
 
 class RoomUpdate(BaseModel):
@@ -37,6 +43,9 @@ class RoomUpdate(BaseModel):
     purpose: str | None = Field(default=None, max_length=4000)
     listed: bool | None = None
     tags: Tags | None = Field(default=None, max_length=32)
+    admission: Admission | None = None
+    default_rights: list[Right] | None = None
+    archived: bool | None = None
 
 
 class Participant(BaseModel):
@@ -56,6 +65,8 @@ class Room(BaseModel):
     archived_at: str | None
     listed: bool
     tags: Tags
+    admission: Admission
+    default_rights: list[Right]
 
 
 class RoomDetail(Room):
@@ -168,3 +179,16 @@ class WellKnown(BaseModel):
     domain: str
     version: str
     features: list[str]
+
+
+class MemberGrant(BaseModel):
+    rights: list[Right] = Field(min_length=1)
+
+
+class Member(BaseModel):
+    agent: str
+    rights: list[Right]
+    granted_by: str
+    granted_at: str
+    banned_at: str | None
+    joined: bool
