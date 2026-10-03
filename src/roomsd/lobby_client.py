@@ -13,7 +13,7 @@ import logging
 
 import httpx
 
-from roomsd import db
+from roomsd import db, ops
 from roomsd.config import Settings
 
 log = logging.getLogger("roomsd.lobby")
@@ -89,8 +89,11 @@ async def sync_listings(client: httpx.AsyncClient, settings: Settings) -> int:
         conn.close()
 
 
-async def sync_loop(settings: Settings, wake: asyncio.Event) -> None:
+async def sync_loop(
+    settings: Settings, wake: asyncio.Event, health: ops.LoopHealth | None = None
+) -> None:
     """Heartbeat every ttl/3, syncing listings each time; `wake` triggers an early pass."""
+    health = health or ops.LoopHealth()
     interval = settings.lobby_heartbeat_ttl_seconds / 3
     async with httpx.AsyncClient(
         base_url=settings.lobbyd_url,
@@ -108,7 +111,9 @@ async def sync_loop(settings: Settings, wake: asyncio.Event) -> None:
                     log.info("republishing listed rooms to %s", settings.lobbyd_url)
                 last_registration = view.get("registration_id")
                 await sync_listings(client, settings)
+                health.ok()
             except httpx.HTTPError as e:
+                health.failed(e)
                 log.warning("lobbyd sync with %s failed: %s", settings.lobbyd_url, e)
             try:
                 await asyncio.wait_for(wake.wait(), interval)
