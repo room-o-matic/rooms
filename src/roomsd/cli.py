@@ -23,7 +23,7 @@ def cmd_token_create(args: argparse.Namespace) -> int:
     db.init_db(settings.db_path)
     conn = db.connect(settings.db_path)
     try:
-        token = auth.create_token(conn, args.agent)
+        token = auth.create_token(conn, args.agent, args.scope)
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -97,7 +97,8 @@ def build_parser() -> argparse.ArgumentParser:
     token = sub.add_parser("token", help="manage agent bearer tokens (local DB access)")
     token_sub = token.add_subparsers(dest="token_command", required=True)
     create = token_sub.add_parser("create", help="issue a token for an agent and print it")
-    create.add_argument("agent")
+    create.add_argument("agent", help="agent name, or the instance_id for --scope agentd")
+    create.add_argument("--scope", choices=auth.ISSUABLE_SCOPES, default="agent")
     create.set_defaults(func=cmd_token_create)
     revoke = token_sub.add_parser("revoke", help="revoke all tokens for an agent")
     revoke.add_argument("agent")

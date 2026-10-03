@@ -48,8 +48,30 @@ create table if not exists notes (
 create table if not exists tokens (
   token_hash text primary key,
   agent text not null,
+  scope text not null default 'agent',
+  room_id text references rooms(id),
+  role text,
+  invite_id text unique,
+  created_by text,
   created_at text not null,
+  expires_at text,
   revoked_at text
+);
+
+create index if not exists tokens_agent on tokens(agent);
+create index if not exists tokens_room_id on tokens(room_id) where invite_id is not null;
+
+create table if not exists agentd_instances (
+  instance_id text primary key,
+  base_url text not null,
+  worker_types_json text not null,
+  profiles_json text not null,
+  max_sessions integer not null,
+  active_sessions integer not null,
+  metadata_json text,
+  registered_at text not null,
+  last_heartbeat_at text not null,
+  expires_at text not null
 );
 
 create table if not exists audit (
@@ -84,6 +106,7 @@ def init_db(path: Path) -> None:
 
 
 def audit(conn: sqlite3.Connection, agent: str, action: str, room_id: str | None, **detail) -> None:
+    detail = {k: v for k, v in detail.items() if v is not None}
     conn.execute(
         "insert into audit (room_id, agent, action, detail_json, created_at)"
         " values (?, ?, ?, ?, ?)",

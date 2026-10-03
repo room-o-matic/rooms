@@ -105,3 +105,57 @@ class Note(BaseModel):
 class NotesResponse(BaseModel):
     room_id: str
     notes: dict[str, Note]
+
+
+class WhoAmI(BaseModel):
+    agent: str
+    scope: str
+    room_id: str | None
+    role: str | None
+    invite_id: str | None
+    expires_at: str | None
+
+
+class InviteCreate(BaseModel):
+    name: str = Field(description="invitee name; identity becomes '<inviter>/<name>'")
+    role: str | None = Field(default=None, max_length=64)
+    ttl_seconds: int | None = Field(default=None, ge=60)
+
+
+class Invite(BaseModel):
+    invite_id: str
+    room_id: str
+    agent: str
+    role: str | None
+    created_by: str
+    created_at: str
+    expires_at: str
+    revoked_at: str | None
+
+
+class InviteCreated(Invite):
+    token: str
+
+
+class AgentdRegistration(BaseModel):
+    base_url: str = Field(pattern=r"^https?://", max_length=2048)
+    worker_types: list[str] = Field(min_length=1)
+    profiles: list[str] = Field(default_factory=list)
+    max_sessions: int = Field(ge=0)
+    active_sessions: int = Field(default=0, ge=0)
+    metadata: dict[str, JsonValue] | None = None
+    ttl_seconds: int | None = Field(default=None, ge=5)
+
+
+class AgentdInstance(BaseModel):
+    instance_id: str
+    base_url: str
+    worker_types: list[str]
+    profiles: list[str]
+    max_sessions: int
+    active_sessions: int
+    available_sessions: int
+    metadata: dict[str, JsonValue] | None
+    registered_at: str
+    last_heartbeat_at: str
+    expires_at: str

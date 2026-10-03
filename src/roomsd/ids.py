@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
@@ -16,4 +16,13 @@ def new_id(prefix: str) -> str:
 
 
 def now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return _iso(datetime.now(UTC))
+
+
+def iso_in(seconds: int) -> str:
+    return _iso(datetime.now(UTC) + timedelta(seconds=seconds))
+
+
+def _iso(t: datetime) -> str:
+    # Fixed-width UTC timestamps compare correctly as strings in SQL.
+    return t.isoformat(timespec="milliseconds").replace("+00:00", "Z")
