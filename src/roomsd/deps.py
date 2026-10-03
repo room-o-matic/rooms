@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from collections.abc import Iterator
 from typing import Annotated
@@ -95,6 +96,40 @@ def require_participant(conn: sqlite3.Connection, room_id: str, caller: Principa
         )
     if cur.rowcount == 0:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "join the room first")
+    return room
+
+
+RIGHTS = ("read", "write", "invite", "admin")
+GUEST_RIGHTS = frozenset({"read", "write"})  # invites can never invite or administer
+
+
+def member_row(conn: sqlite3.Connection, room_id: str, agent: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "select * from members where room_id = ? and agent = ?", (room_id, agent)
+    ).fetchone()
+
+
+def rights_of(conn: sqlite3.Connection, room: sqlite3.Row, caller: Principal) -> frozenset[str]:
+    """The caller's rights in `room` (docs#10). Roles are advisory and grant nothing."""
+    if caller.scope == "invite":
+        return GUEST_RIGHTS
+    if caller.agent == room["created_by"]:
+        return frozenset(RIGHTS)
+    row = member_row(conn, room["id"], caller.agent)
+    if row is None or row["banned_at"] is not None:
+        return frozenset()
+    return frozenset(json.loads(row["rights_json"]))
+
+
+def require_right(
+    conn: sqlite3.Connection, room_id: str, caller: Principal, right: str
+) -> sqlite3.Row:
+    """The one gate for room routes: the room exists, the caller has joined it, and holds
+    `right`. Authorization is decided once per request; a grant change applies from the
+    next request (a request already past this check completes)."""
+    room = require_participant(conn, room_id, caller)
+    if right not in rights_of(conn, room, caller):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, f"you don't have {right!r} in this room")
     return room
 
 

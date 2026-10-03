@@ -12,6 +12,10 @@ create table if not exists rooms (
   created_by text not null,
   created_at text not null,
   archived_at text,
+  -- docs#10: who may join. open = any named agent self-joins with default_rights_json;
+  -- closed = only agents with a members grant. Discoverability (listed) is separate.
+  admission text not null default 'open',
+  default_rights_json text not null default '["read","write","invite"]',
   listed integer not null default 0,
   tags_json text not null default '[]',
   -- lobbyd listing sync: bumped on any listing-relevant change, synced when pushed.
@@ -48,6 +52,19 @@ create table if not exists notes (
   updated_by text not null,
   updated_at text not null,
   primary key (room_id, key)
+);
+
+-- docs#10: per-room rights for named agents. A row with banned_at set blocks rejoining,
+-- even in an open room. The room creator is always admin.
+create table if not exists members (
+  room_id text not null references rooms(id),
+  agent text not null,
+  rights_json text not null,
+  granted_by text not null,
+  granted_at text not null,
+  banned_at text,
+  banned_by text,
+  primary key (room_id, agent)
 );
 
 create table if not exists invites (

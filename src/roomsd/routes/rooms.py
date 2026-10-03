@@ -3,20 +3,24 @@ import re
 import sqlite3
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 
 from roomsd import auth, db
 from roomsd.config import Settings
 from roomsd.deps import (
+    RIGHTS,
     Caller,
     Conn,
     RoomId,
     SettingsDep,
     assert_identity,
+    member_row,
     require_participant,
+    require_right,
     require_room,
     require_scope,
     require_writable,
+    rights_of,
 )
 from roomsd.ids import new_id, now_iso
 from roomsd.models import (
@@ -25,6 +29,8 @@ from roomsd.models import (
     InviteCreate,
     InviteCreated,
     JoinRequest,
+    Member,
+    MemberGrant,
     Message,
     MessageCreate,
     MessagesPage,
@@ -91,6 +97,8 @@ def room_from_row(row: sqlite3.Row, settings: Settings) -> Room:
         archived_at=row["archived_at"],
         listed=bool(row["listed"]),
         tags=json.loads(row["tags_json"]),
+        admission=row["admission"],
+        default_rights=json.loads(row["default_rights_json"]),
     )
 
 
@@ -108,10 +116,13 @@ def create_room(
     assert_identity(caller, req.created_by)
     room_id = new_id("room")
     now = now_iso()
+    admission = req.admission or settings.default_admission
+    default_rights = req.default_rights or ["read", "write", "invite"]
     with conn:
         conn.execute(
             "insert into rooms (id, name, purpose, created_by, created_at, listed, tags_json,"
-            " listing_version) values (?, ?, ?, ?, ?, ?, ?, ?)",
+            " listing_version, admission, default_rights_json)"
+            " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 room_id,
                 req.name,
@@ -121,7 +132,14 @@ def create_room(
                 int(req.listed),
                 json.dumps(req.tags),
                 int(req.listed),
+                admission,
+                json.dumps(default_rights),
             ),
+        )
+        conn.execute(
+            "insert into members (room_id, agent, rights_json, granted_by, granted_at)"
+            " values (?, ?, ?, ?, ?)",
+            (room_id, caller.agent, json.dumps(list(RIGHTS)), caller.agent, now),
         )
         conn.execute(
             "insert into participants (room_id, agent, joined_at, last_seen_at)"
@@ -143,25 +161,36 @@ def update_room(
     caller: Caller,
     settings: SettingsDep,
 ) -> Room:
-    """The room creator may rename, re-describe, retag, and list or unlist the room."""
-    room = require_participant(conn, room_id, caller)
-    require_writable(room)
-    if caller.agent != room["created_by"]:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "only the room creator can update it")
+    """Admins may rename, re-describe, retag, list or unlist, change admission, and
+    archive or unarchive the room. An archived room only accepts the unarchive."""
+    room = require_right(conn, room_id, caller, "admin")
     changes = req.model_dump(exclude_unset=True)
+    if room["archived_at"] is not None and set(changes) != {"archived"}:
+        require_writable(room)
     if not changes:
         return room_from_row(room, settings)
+    archived_at = room["archived_at"]
+    if req.archived is not None:
+        archived_at = (archived_at or now_iso()) if req.archived else None
     columns = {
         "name": req.name or room["name"],
         "purpose": req.purpose if "purpose" in changes else room["purpose"],
         "listed": int(req.listed) if req.listed is not None else room["listed"],
         "tags_json": json.dumps(req.tags) if req.tags is not None else room["tags_json"],
+        "admission": req.admission or room["admission"],
+        "default_rights_json": (
+            json.dumps(req.default_rights)
+            if req.default_rights is not None
+            else room["default_rights_json"]
+        ),
+        "archived_at": archived_at,
     }
     # Anything lobbyd shows changed while listed, or listing itself toggled: resync.
     resync = room["listed"] or columns["listed"]
     with conn:
         conn.execute(
-            "update rooms set name = ?, purpose = ?, listed = ?, tags_json = ?,"
+            "update rooms set name = ?, purpose = ?, listed = ?, tags_json = ?, admission = ?,"
+            " default_rights_json = ?, archived_at = ?,"
             " listing_version = listing_version + ? where id = ?",
             (*columns.values(), int(bool(resync)), room_id),
         )
@@ -186,7 +215,7 @@ def list_rooms(conn: Conn, caller: Caller, settings: SettingsDep) -> list[Room]:
 
 @router.get("/{room_id}")
 def get_room(room_id: RoomId, conn: Conn, caller: Caller, settings: SettingsDep) -> RoomDetail:
-    room = require_participant(conn, room_id, caller)
+    room = require_right(conn, room_id, caller, "read")
     participants = conn.execute(
         "select agent, role, joined_at, last_seen_at from participants"
         " where room_id = ? order by joined_at",
@@ -201,7 +230,20 @@ def get_room(room_id: RoomId, conn: Conn, caller: Caller, settings: SettingsDep)
 @router.post("/{room_id}/participants")
 def join_room(room_id: RoomId, req: JoinRequest, conn: Conn, caller: Caller) -> Participant:
     assert_identity(caller, req.agent)
-    require_writable(require_room(conn, room_id, caller))
+    room = require_room(conn, room_id, caller)
+    require_writable(room)
+    grant = member_row(conn, room_id, caller.agent)
+    if grant is not None and grant["banned_at"] is not None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "you were removed from this room")
+    if (
+        caller.scope == "agent"
+        and grant is None
+        and caller.agent != room["created_by"]
+        and room["admission"] != "open"
+    ):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "this room is closed; an admin must grant you access"
+        )
     role = req.role
     if caller.scope == "invite":
         if req.role is not None and req.role != caller.role:
@@ -218,6 +260,13 @@ def join_room(room_id: RoomId, req: JoinRequest, conn: Conn, caller: Caller) -> 
             " role = coalesce(excluded.role, role), last_seen_at = excluded.last_seen_at",
             (room_id, caller.agent, role, now, now),
         )
+        if caller.scope == "agent" and grant is None:
+            # Self-join of an open room: the room's default rights.
+            conn.execute(
+                "insert or ignore into members"
+                " (room_id, agent, rights_json, granted_by, granted_at) values (?, ?, ?, ?, ?)",
+                (room_id, caller.agent, room["default_rights_json"], "admission:open", now),
+            )
         db.audit(conn, caller.agent, "room.join", room_id, role=role, invite_id=caller.invite_id)
     row = conn.execute(
         "select agent, role, joined_at, last_seen_at from participants"
@@ -232,7 +281,7 @@ def post_message(
     room_id: RoomId, req: MessageCreate, conn: Conn, caller: Caller, settings: SettingsDep
 ) -> Message:
     assert_identity(caller, req.from_)
-    require_writable(require_participant(conn, room_id, caller))
+    require_writable(require_right(conn, room_id, caller, "write"))
     if len(req.body.encode()) > settings.max_message_bytes:
         raise HTTPException(
             status.HTTP_413_CONTENT_TOO_LARGE,
@@ -273,7 +322,7 @@ def read_messages(
     after_id: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> MessagesPage:
-    require_participant(conn, room_id, caller)
+    require_right(conn, room_id, caller, "read")
     rows = conn.execute(
         "select * from messages where room_id = ? and id > ? order by id limit ?",
         (room_id, after_id, limit),
@@ -294,7 +343,7 @@ def put_note(
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "note key must match [A-Za-z0-9_.-]{1,64}"
         )
-    require_writable(require_participant(conn, room_id, caller))
+    require_writable(require_right(conn, room_id, caller, "write"))
     value_json = json.dumps(req.value)
     if len(value_json.encode()) > settings.max_note_bytes:
         raise HTTPException(
@@ -322,7 +371,7 @@ def read_notes(
     caller: Caller,
     keys: Annotated[str | None, Query(description="comma-separated note keys")] = None,
 ) -> NotesResponse:
-    require_participant(conn, room_id, caller)
+    require_right(conn, room_id, caller, "read")
     sql, params = "select * from notes where room_id = ?", [room_id]
     wanted = [k.strip() for k in (keys or "").split(",") if k.strip()]
     if wanted:
@@ -334,7 +383,7 @@ def read_notes(
 
 @router.get("/{room_id}/notes/{key}")
 def get_note(room_id: RoomId, key: str, conn: Conn, caller: Caller) -> Note:
-    require_participant(conn, room_id, caller)
+    require_right(conn, room_id, caller, "read")
     row = conn.execute(
         "select * from notes where room_id = ? and key = ?", (room_id, key)
     ).fetchone()
@@ -352,7 +401,7 @@ def create_invite(
     Only named agents can invite; invitees cannot invite further.
     """
     require_scope(caller, "agent")
-    require_writable(require_participant(conn, room_id, caller))
+    require_writable(require_right(conn, room_id, caller, "invite"))
     ttl = req.ttl_seconds or settings.default_invite_ttl_seconds
     if ttl > settings.max_invite_ttl_seconds:
         raise HTTPException(
@@ -403,7 +452,7 @@ def create_invite(
 @router.get("/{room_id}/invites")
 def list_invites(room_id: RoomId, conn: Conn, caller: Caller) -> list[Invite]:
     require_scope(caller, "agent")
-    require_participant(conn, room_id, caller)
+    require_right(conn, room_id, caller, "invite")
     rows = conn.execute(
         "select * from invites where room_id = ? order by created_at",
         (room_id,),
@@ -413,7 +462,7 @@ def list_invites(room_id: RoomId, conn: Conn, caller: Caller) -> list[Invite]:
 
 @router.delete("/{room_id}/invites/{invite_id}")
 def revoke_invite(room_id: RoomId, invite_id: str, conn: Conn, caller: Caller) -> Invite:
-    """The inviter or the room creator may revoke an invite."""
+    """The inviter or a room admin may revoke an invite."""
     require_scope(caller, "agent")
     room = require_participant(conn, room_id, caller)
     row = conn.execute(
@@ -421,10 +470,8 @@ def revoke_invite(room_id: RoomId, invite_id: str, conn: Conn, caller: Caller) -
     ).fetchone()
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "invite not found")
-    if caller.agent not in (row["created_by"], room["created_by"]):
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN, "only the inviter or room creator can revoke"
-        )
+    if caller.agent != row["created_by"] and "admin" not in rights_of(conn, room, caller):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "only the inviter or an admin can revoke")
     with conn:
         conn.execute(
             "update invites set revoked_at = coalesce(revoked_at, ?) where invite_id = ?",
@@ -433,3 +480,101 @@ def revoke_invite(room_id: RoomId, invite_id: str, conn: Conn, caller: Caller) -
         db.audit(conn, caller.agent, "invite.revoke", room_id, invite_id=invite_id)
     row = conn.execute("select * from invites where invite_id = ?", (invite_id,)).fetchone()
     return invite_from_row(row)
+
+
+# ----- membership (docs#10) ------------------------------------------------------------
+
+
+def member_from_row(row: sqlite3.Row, joined: bool) -> Member:
+    return Member(
+        agent=row["agent"],
+        rights=json.loads(row["rights_json"]),
+        granted_by=row["granted_by"],
+        granted_at=row["granted_at"],
+        banned_at=row["banned_at"],
+        joined=joined,
+    )
+
+
+@router.get("/{room_id}/members")
+def list_members(room_id: RoomId, conn: Conn, caller: Caller) -> list[Member]:
+    require_right(conn, room_id, caller, "read")
+    joined = {
+        r[0] for r in conn.execute("select agent from participants where room_id = ?", (room_id,))
+    }
+    rows = conn.execute(
+        "select * from members where room_id = ? order by granted_at", (room_id,)
+    ).fetchall()
+    return [member_from_row(r, r["agent"] in joined) for r in rows]
+
+
+@router.put("/{room_id}/members/{agent:path}")
+def grant_member(
+    room_id: RoomId, agent: str, req: MemberGrant, conn: Conn, caller: Caller
+) -> Member:
+    """Grant or change a named agent's rights (admins only). Also lifts a ban: this is how
+    an admin re-admits someone, and how a closed room admits an approved peer."""
+    require_scope(caller, "agent")
+    room = require_right(conn, room_id, caller, "admin")
+    if "/" in agent or "@" not in agent:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "grants are for named agents (name@domain)"
+        )
+    if agent == room["created_by"]:
+        raise HTTPException(status.HTTP_409_CONFLICT, "the room creator is always admin")
+    with conn:
+        conn.execute(
+            "insert into members (room_id, agent, rights_json, granted_by, granted_at)"
+            " values (?, ?, ?, ?, ?) on conflict (room_id, agent) do update set"
+            " rights_json = excluded.rights_json, granted_by = excluded.granted_by,"
+            " granted_at = excluded.granted_at, banned_at = null, banned_by = null",
+            (room_id, agent, json.dumps(sorted(set(req.rights))), caller.agent, now_iso()),
+        )
+        db.audit(conn, caller.agent, "member.grant", room_id, target=agent, rights=req.rights)
+    row = member_row(conn, room_id, agent)
+    joined = conn.execute(
+        "select 1 from participants where room_id = ? and agent = ?", (room_id, agent)
+    ).fetchone()
+    return member_from_row(row, joined is not None)
+
+
+@router.delete("/{room_id}/members/{agent:path}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_member(
+    room_id: RoomId,
+    agent: str,
+    conn: Conn,
+    caller: Caller,
+    ban: bool = False,
+) -> Response:
+    """Remove a named agent or a guest (admins only). Removal takes effect on the target's
+    next request, whatever tokens it holds. It also invalidates what the target delegated:
+    invites it issued are revoked and their guests removed. With ban=true the agent can't
+    rejoin until an admin grants it again, even in an open room."""
+    require_scope(caller, "agent")
+    room = require_right(conn, room_id, caller, "admin")
+    if agent == room["created_by"]:
+        raise HTTPException(status.HTTP_409_CONFLICT, "the room creator can't be removed")
+    now = now_iso()
+    with conn:
+        guest_prefix = agent + "/"
+        conn.execute(
+            "delete from participants where room_id = ? and (agent = ? or substr(agent, 1, ?) = ?)",
+            (room_id, agent, len(guest_prefix), guest_prefix),
+        )
+        conn.execute(
+            "update invites set revoked_at = coalesce(revoked_at, ?)"
+            " where room_id = ? and (agent = ? or created_by = ?)",
+            (now, room_id, agent, agent),
+        )
+        if ban:
+            conn.execute(
+                "insert into members (room_id, agent, rights_json, granted_by, granted_at,"
+                " banned_at, banned_by) values (?, ?, '[]', ?, ?, ?, ?)"
+                " on conflict (room_id, agent) do update set rights_json = '[]',"
+                " banned_at = excluded.banned_at, banned_by = excluded.banned_by",
+                (room_id, agent, caller.agent, now, now, caller.agent),
+            )
+        else:
+            conn.execute("delete from members where room_id = ? and agent = ?", (room_id, agent))
+        db.audit(conn, caller.agent, "member.remove", room_id, target=agent, ban=ban)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

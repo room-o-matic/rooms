@@ -33,6 +33,14 @@ def updates(
     if caller.scope == "invite":
         sql += " and m.room_id = ?"
         params.append(caller.room_id)
+    else:  # docs#10: only rooms where the caller holds "read"
+        sql += (
+            " and (exists (select 1 from rooms r where r.id = m.room_id and r.created_by = ?)"
+            " or exists (select 1 from members mb, json_each(mb.rights_json) j"
+            " where mb.room_id = m.room_id and mb.agent = ? and mb.banned_at is null"
+            " and j.value = 'read'))"
+        )
+        params += [caller.agent, caller.agent]
     rows = conn.execute(sql + " order by m.id limit ?", [*params, limit]).fetchall()
     messages = [message_from_row(r) for r in rows]
     return UpdatesPage(
