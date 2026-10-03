@@ -22,7 +22,7 @@ from roomsd.deps import (
     require_writable,
     rights_of,
 )
-from roomsd.ids import new_id, now_iso
+from roomsd.ids import iso_in, new_id, now_iso
 from roomsd.models import (
     PAYLOAD_FIELDS,
     Invite,
@@ -99,6 +99,9 @@ def room_from_row(row: sqlite3.Row, settings: Settings) -> Room:
         tags=json.loads(row["tags_json"]),
         admission=row["admission"],
         default_rights=json.loads(row["default_rights_json"]),
+        paused=bool(row["paused"]),
+        max_hops=row["max_hops"],
+        message_rate_per_minute=row["message_rate_per_minute"],
     )
 
 
@@ -121,8 +124,8 @@ def create_room(
     with conn:
         conn.execute(
             "insert into rooms (id, name, purpose, created_by, created_at, listed, tags_json,"
-            " listing_version, admission, default_rights_json)"
-            " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " listing_version, admission, default_rights_json, max_hops,"
+            " message_rate_per_minute) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 room_id,
                 req.name,
@@ -134,6 +137,8 @@ def create_room(
                 int(req.listed),
                 admission,
                 json.dumps(default_rights),
+                req.max_hops or 8,
+                req.message_rate_per_minute,
             ),
         )
         conn.execute(
@@ -184,14 +189,21 @@ def update_room(
             else room["default_rights_json"]
         ),
         "archived_at": archived_at,
+        "paused": int(req.paused) if req.paused is not None else room["paused"],
+        "max_hops": req.max_hops or room["max_hops"],
+        "message_rate_per_minute": (
+            req.message_rate_per_minute
+            if "message_rate_per_minute" in changes
+            else room["message_rate_per_minute"]
+        ),
     }
     # Anything lobbyd shows changed while listed, or listing itself toggled: resync.
     resync = room["listed"] or columns["listed"]
     with conn:
         conn.execute(
             "update rooms set name = ?, purpose = ?, listed = ?, tags_json = ?, admission = ?,"
-            " default_rights_json = ?, archived_at = ?,"
-            " listing_version = listing_version + ? where id = ?",
+            " default_rights_json = ?, archived_at = ?, paused = ?, max_hops = ?,"
+            " message_rate_per_minute = ?, listing_version = listing_version + ? where id = ?",
             (*columns.values(), int(bool(resync)), room_id),
         )
         db.audit(conn, caller.agent, "room.update", room_id, **changes)
@@ -281,14 +293,51 @@ def post_message(
     room_id: RoomId, req: MessageCreate, conn: Conn, caller: Caller, settings: SettingsDep
 ) -> Message:
     assert_identity(caller, req.from_)
-    require_writable(require_right(conn, room_id, caller, "write"))
+    room = require_right(conn, room_id, caller, "write")
+    require_writable(room)
     if len(req.body.encode()) > settings.max_message_bytes:
         raise HTTPException(
             status.HTTP_413_CONTENT_TOO_LARGE,
             f"body exceeds {settings.max_message_bytes} bytes; publish an artifact instead",
         )
-    payload = {k: v for k in PAYLOAD_FIELDS if (v := getattr(req, k)) is not None}
+    is_admin = "admin" in rights_of(conn, room, caller)
+    if room["paused"] and not is_admin:
+        raise HTTPException(status.HTTP_423_LOCKED, "room is paused by its owner")
+    hop = None
+    if req.in_reply_to is not None:
+        parent = conn.execute(
+            "select payload_json from messages where id = ? and room_id = ?",
+            (req.in_reply_to, room_id),
+        ).fetchone()
+        if parent is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "in_reply_to is not a message in this room"
+            )
+        hop = (json.loads(parent["payload_json"] or "{}").get("hop") or 0) + 1
+        if hop > room["max_hops"]:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"reply chain is {hop} deep, over this room's max_hops ({room['max_hops']});"
+                " start a new thread or ask a human",
+            )
+    payload = {k: v for k in PAYLOAD_FIELDS if (v := getattr(req, k, None)) is not None}
+    if hop is not None:
+        payload["hop"] = hop
     with conn:
+        if room["message_rate_per_minute"] and not is_admin:
+            conn.execute("begin immediate")
+            since = iso_in(-60)
+            recent = conn.execute(
+                "select count(*) from messages where room_id = ? and created_at > ?"
+                " and sender != ?",
+                (room_id, since, room["created_by"]),
+            ).fetchone()[0]
+            if recent >= room["message_rate_per_minute"]:
+                raise HTTPException(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    f"room message budget reached ({room['message_rate_per_minute']}/min)",
+                    headers={"Retry-After": "60"},
+                )
         cur = conn.execute(
             "insert into messages (room_id, sender, type, topic, body, payload_json, created_at)"
             " values (?, ?, ?, ?, ?, ?, ?)",

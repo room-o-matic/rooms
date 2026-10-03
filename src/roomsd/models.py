@@ -18,7 +18,17 @@ MessageType = Literal[
 ]
 
 # Optional typed-message fields persisted in messages.payload_json.
-PAYLOAD_FIELDS = ("confidence", "reply_requested", "severity", "based_on_messages")
+PAYLOAD_FIELDS = (
+    "confidence",
+    "reply_requested",
+    "severity",
+    "based_on_messages",
+    "to",
+    "in_reply_to",
+    "hop",
+)
+# docs#16: informational types that should never wake an agent on their own.
+NON_WAKING_TYPES = ("status", "handoff", "decision", "artifact", "task_update")
 
 
 Tags = list[str]
@@ -36,6 +46,10 @@ class RoomCreate(BaseModel):
     default_rights: list[Right] | None = Field(
         default=None, description="rights for self-joiners of an open room"
     )
+    max_hops: int | None = Field(default=None, ge=1, le=100, description="reply-chain depth cap")
+    message_rate_per_minute: int | None = Field(
+        default=None, ge=1, le=10_000, description="per-room cap for non-admins"
+    )
 
 
 class RoomUpdate(BaseModel):
@@ -46,6 +60,9 @@ class RoomUpdate(BaseModel):
     admission: Admission | None = None
     default_rights: list[Right] | None = None
     archived: bool | None = None
+    paused: bool | None = Field(default=None, description="stop/drain: only admins may post")
+    max_hops: int | None = Field(default=None, ge=1, le=100)
+    message_rate_per_minute: int | None = Field(default=None, ge=1, le=10_000)
 
 
 class Participant(BaseModel):
@@ -67,6 +84,9 @@ class Room(BaseModel):
     tags: Tags
     admission: Admission
     default_rights: list[Right]
+    paused: bool
+    max_hops: int
+    message_rate_per_minute: int | None
 
 
 class RoomDetail(Room):
@@ -94,6 +114,10 @@ class MessageCreate(BaseModel):
     reply_requested: bool | None = None
     severity: str | None = Field(default=None, max_length=32)
     based_on_messages: list[int] | None = None
+    to: list[str] | None = Field(
+        default=None, max_length=32, description="structured recipients (identities)"
+    )
+    in_reply_to: int | None = Field(default=None, description="a message in this room")
 
 
 class Message(BaseModel):
@@ -109,6 +133,9 @@ class Message(BaseModel):
     reply_requested: bool | None = None
     severity: str | None = None
     based_on_messages: list[int] | None = None
+    to: list[str] | None = None
+    in_reply_to: int | None = None
+    hop: int | None = Field(default=None, description="reply-chain depth, computed by roomsd")
     created_at: str
 
 

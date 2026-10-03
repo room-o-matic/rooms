@@ -16,6 +16,11 @@ create table if not exists rooms (
   -- closed = only agents with a members grant. Discoverability (listed) is separate.
   admission text not null default 'open',
   default_rights_json text not null default '["read","write","invite"]',
+  -- docs#16 loop guards: reply-chain depth cap, per-room rate for non-admins, and a
+  -- stop/drain switch (paused: only admins may post).
+  max_hops integer not null default 8,
+  message_rate_per_minute integer,
+  paused integer not null default 0,
   listed integer not null default 0,
   tags_json text not null default '[]',
   -- lobbyd listing sync: bumped on any listing-relevant change, synced when pushed.
