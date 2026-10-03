@@ -63,3 +63,29 @@ def test_actions_are_audited(client, settings, room_id, boostie, missy):
         ("missy@test", "message.post"),
         ("missy@test", "note.put"),
     ]
+
+
+def test_request_connection_can_change_threads(settings):
+    """Regression: FastAPI enters get_conn in one threadpool thread and runs the route in
+    another; under concurrent load sqlite3 used to raise ProgrammingError."""
+    import threading
+
+    conn = db.connect(settings.db_path)
+    result = []
+    t = threading.Thread(target=lambda: result.append(conn.execute("select 1").fetchone()[0]))
+    t.start()
+    t.join()
+    conn.close()
+    assert result == [1]
+
+
+def test_concurrent_requests(client, room_id, boostie):
+    from concurrent.futures import ThreadPoolExecutor
+
+    def post(i):
+        return client.post(
+            f"/v1/rooms/{room_id}/messages", json={"body": f"m{i}"}, headers=boostie
+        ).status_code
+
+    with ThreadPoolExecutor(8) as pool:
+        assert set(pool.map(post, range(40))) == {201}
