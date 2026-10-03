@@ -84,6 +84,36 @@ def within_page_budget(rows: list[sqlite3.Row], budget: int) -> list[sqlite3.Row
     return out
 
 
+# docs#23: presence. `available` = seen within the TTL, and a guest (an identity with an
+# invite to this room) must still hold a live invite.
+PARTICIPANT_SQL = (
+    "select p.agent, p.role, p.joined_at, p.last_seen_at,"
+    " (p.last_seen_at > :seen_after"
+    "  and (not exists (select 1 from invites i where i.room_id = p.room_id"
+    "                   and i.agent = p.agent)"
+    "       or exists (select 1 from invites i where i.room_id = p.room_id"
+    "                  and i.agent = p.agent and i.revoked_at is null"
+    "                  and i.expires_at > :now))) as available"
+    " from participants p where p.room_id = :room_id"
+)
+
+
+def participants_of(
+    conn: sqlite3.Connection, room_id: str, settings: Settings, agent: str | None = None
+) -> list[Participant]:
+    sql = PARTICIPANT_SQL + (" and p.agent = :agent" if agent else "") + " order by p.joined_at"
+    rows = conn.execute(
+        sql,
+        {
+            "room_id": room_id,
+            "agent": agent,
+            "now": now_iso(),
+            "seen_after": iso_in(-settings.presence_ttl_seconds),
+        },
+    ).fetchall()
+    return [Participant(**{**dict(r), "available": bool(r["available"])}) for r in rows]
+
+
 def note_from_row(row: sqlite3.Row) -> Note:
     return Note(
         key=row["key"],
@@ -264,19 +294,16 @@ def list_rooms(conn: Conn, caller: Caller, settings: SettingsDep) -> list[Room]:
 @router.get("/{room_id}")
 def get_room(room_id: RoomId, conn: Conn, caller: Caller, settings: SettingsDep) -> RoomDetail:
     room = require_right(conn, room_id, caller, "read")
-    participants = conn.execute(
-        "select agent, role, joined_at, last_seen_at from participants"
-        " where room_id = ? order by joined_at",
-        (room_id,),
-    ).fetchall()
     return RoomDetail(
         **room_from_row(room, settings).model_dump(),
-        participants=[Participant(**dict(p)) for p in participants],
+        participants=participants_of(conn, room_id, settings),
     )
 
 
 @router.post("/{room_id}/participants")
-def join_room(room_id: RoomId, req: JoinRequest, conn: Conn, caller: Caller) -> Participant:
+def join_room(
+    room_id: RoomId, req: JoinRequest, conn: Conn, caller: Caller, settings: SettingsDep
+) -> Participant:
     assert_identity(caller, req.agent)
     room = require_room(conn, room_id, caller)
     require_writable(room)
@@ -316,12 +343,7 @@ def join_room(room_id: RoomId, req: JoinRequest, conn: Conn, caller: Caller) -> 
                 (room_id, caller.agent, room["default_rights_json"], "admission:open", now),
             )
         db.audit(conn, caller.agent, "room.join", room_id, role=role, invite_id=caller.invite_id)
-    row = conn.execute(
-        "select agent, role, joined_at, last_seen_at from participants"
-        " where room_id = ? and agent = ?",
-        (room_id, caller.agent),
-    ).fetchone()
-    return Participant(**dict(row))
+    return participants_of(conn, room_id, settings, caller.agent)[0]
 
 
 @router.post("/{room_id}/messages", status_code=status.HTTP_201_CREATED)

@@ -76,7 +76,15 @@ class Participant(BaseModel):
     agent: str
     role: str | None
     joined_at: str
-    last_seen_at: str | None
+    last_seen_at: str | None = Field(
+        description="last authenticated activity covering this room: any request to the"
+        " room, or a /v1/me/updates poll (empty or not) whose scope includes it"
+    )
+    available: bool = Field(
+        description="seen within the server's presence_ttl_seconds and, for an invited"
+        " guest, still holding a live (unrevoked, unexpired) invite. Membership alone is"
+        " not availability."
+    )
 
 
 class Room(BaseModel):

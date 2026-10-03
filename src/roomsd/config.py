@@ -33,6 +33,8 @@ class Settings:
     max_page_bytes: int = 4 * 1024 * 1024
     max_note_bytes: int = 256 * 1024
     default_invite_ttl_seconds: int = 3600
+    # docs#23: a participant seen within this window is "available" (see PARTICIPANT_SQL).
+    presence_ttl_seconds: int = 120
     max_invite_ttl_seconds: int = 24 * 3600
 
     @property
@@ -64,4 +66,5 @@ class Settings:
             max_request_bytes=int(env("ROOMSD_MAX_REQUEST_BYTES", 1024 * 1024)),
             max_page_bytes=int(env("ROOMSD_MAX_PAGE_BYTES", 4 * 1024 * 1024)),
             max_note_bytes=int(env("ROOMSD_MAX_NOTE_BYTES", 256 * 1024)),
+            presence_ttl_seconds=int(env("ROOMSD_PRESENCE_TTL_SECONDS", 120)),
         )
