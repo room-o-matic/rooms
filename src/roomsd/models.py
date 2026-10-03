@@ -151,13 +151,33 @@ class MessagesPage(BaseModel):
 
 class NotePut(BaseModel):
     value: JsonValue
+    if_revision: int | None = Field(
+        default=None,
+        ge=0,
+        description="compare-and-set: write only if the note is at this revision; "
+        "0 means only if it doesn't exist yet. A mismatch is 412 and nothing changes.",
+    )
 
 
 class Note(BaseModel):
     key: str
     value: JsonValue
+    revision: int
     updated_by: str
     updated_at: str
+
+
+class NoteChange(BaseModel):
+    id: int
+    key: str
+    revision: int
+    updated_by: str
+    updated_at: str
+
+
+class NoteChanges(BaseModel):
+    changes: list[NoteChange]
+    next_cursor: int
 
 
 class NotesResponse(BaseModel):
