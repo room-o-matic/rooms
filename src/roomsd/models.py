@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
@@ -30,6 +30,10 @@ PAYLOAD_FIELDS = (
 # docs#16: informational types that should never wake an agent on their own.
 NON_WAKING_TYPES = ("status", "handoff", "decision", "artifact", "task_update")
 
+
+# docs#21: message references are same-room message IDs (SQLite integer range).
+MessageRef = Annotated[int, Field(ge=1, le=2**63 - 1)]
+MAX_MESSAGE_REFS = 64
 
 Tags = list[str]
 Right = Literal["read", "write", "invite", "admin"]
@@ -117,11 +121,16 @@ class MessageCreate(BaseModel):
     confidence: float | None = Field(default=None, ge=0, le=1)
     reply_requested: bool | None = None
     severity: str | None = Field(default=None, max_length=32)
-    based_on_messages: list[int] | None = None
+    based_on_messages: list[MessageRef] | None = Field(
+        default=None,
+        max_length=MAX_MESSAGE_REFS,
+        description="earlier messages in this room this one builds on; external context"
+        " belongs in the body or an artifact",
+    )
     to: list[str] | None = Field(
         default=None, max_length=32, description="structured recipients (identities)"
     )
-    in_reply_to: int | None = Field(default=None, description="a message in this room")
+    in_reply_to: MessageRef | None = Field(default=None, description="a message in this room")
 
 
 class Message(BaseModel):

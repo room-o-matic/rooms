@@ -4,7 +4,7 @@ from fastapi import APIRouter, Query
 
 from roomsd.deps import Caller, Conn, SettingsDep, require_scope
 from roomsd.models import UpdatesPage
-from roomsd.routes.rooms import message_from_row
+from roomsd.routes.rooms import message_from_row, within_page_budget
 
 router = APIRouter(prefix="/v1/me", tags=["me"])
 
@@ -42,7 +42,7 @@ def updates(
         )
         params += [caller.agent, caller.agent]
     rows = conn.execute(sql + " order by m.id limit ?", [*params, limit]).fetchall()
-    messages = [message_from_row(r) for r in rows]
+    messages = [message_from_row(r) for r in within_page_budget(rows, settings.max_page_bytes)]
     return UpdatesPage(
         messages=messages,
         room_urls={m.room_id: settings.room_url(m.room_id) for m in messages},

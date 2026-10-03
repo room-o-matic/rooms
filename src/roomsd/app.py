@@ -6,6 +6,7 @@ from fastapi import FastAPI
 
 from roomsd import db, lobby_client
 from roomsd.config import Settings
+from roomsd.limits import RequestSizeLimit
 from roomsd.models import WellKnown
 from roomsd.routes import auth, me, rooms, tasks
 from roomsd.verify import TokenVerifier
@@ -35,6 +36,7 @@ def create_app(settings: Settings | None = None, verifier: TokenVerifier | None 
 
     app = FastAPI(title="roomsd", version=VERSION, lifespan=lifespan)
     app.state.settings = settings
+    app.add_middleware(RequestSizeLimit, max_bytes=settings.max_request_bytes)
     app.state.verifier = verifier or TokenVerifier(
         issuer=settings.lobbyd_url,
         domain=settings.lobbyd_domain,

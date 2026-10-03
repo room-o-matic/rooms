@@ -67,6 +67,23 @@ def message_from_row(row: sqlite3.Row) -> Message:
     )
 
 
+def stored_bytes(body: str, topic: str | None, payload_json: str | None) -> int:
+    """Size of a message's stored and served representation (docs#21)."""
+    return sum(len((x or "").encode()) for x in (body, topic, payload_json))
+
+
+def within_page_budget(rows: list[sqlite3.Row], budget: int) -> list[sqlite3.Row]:
+    """Trim a page of message rows to a byte budget, always keeping the first row so a
+    cursor can make progress."""
+    out, used = [], 0
+    for r in rows:
+        used += stored_bytes(r["body"], r["topic"], r["payload_json"])
+        if out and used > budget:
+            break
+        out.append(r)
+    return out
+
+
 def note_from_row(row: sqlite3.Row) -> Note:
     return Note(
         key=row["key"],
@@ -339,9 +356,31 @@ def post_message(
                 f"reply chain is {hop} deep, over this room's max_hops ({room['max_hops']});"
                 " start a new thread or ask a human",
             )
+    if req.based_on_messages:
+        refs = list(dict.fromkeys(req.based_on_messages))
+        marks = ",".join("?" * len(refs))
+        found = {
+            r[0]
+            for r in conn.execute(
+                f"select id from messages where room_id = ? and id in ({marks})", (room_id, *refs)
+            )
+        }
+        if missing := [i for i in refs if i not in found]:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"based_on_messages must be messages in this room; not found: {missing[:10]}",
+            )
+        req.based_on_messages = refs
     payload = {k: v for k in PAYLOAD_FIELDS if (v := getattr(req, k, None)) is not None}
     if hop is not None:
         payload["hop"] = hop
+    payload_json = json.dumps(payload) if payload else None
+    if stored_bytes(req.body, req.topic, payload_json) > settings.max_message_total_bytes:
+        raise HTTPException(
+            status.HTTP_413_CONTENT_TOO_LARGE,
+            f"message (body, topic and typed fields) exceeds"
+            f" {settings.max_message_total_bytes} bytes",
+        )
     with conn:
         if room["message_rate_per_minute"] and not is_admin:
             conn.execute("begin immediate")
@@ -366,7 +405,7 @@ def post_message(
                 req.type,
                 req.topic,
                 req.body,
-                json.dumps(payload) if payload else None,
+                payload_json,
                 now_iso(),
             ),
         )
@@ -387,6 +426,7 @@ def read_messages(
     room_id: RoomId,
     conn: Conn,
     caller: Caller,
+    settings: SettingsDep,
     after_id: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> MessagesPage:
@@ -395,7 +435,7 @@ def read_messages(
         "select * from messages where room_id = ? and id > ? order by id limit ?",
         (room_id, after_id, limit),
     ).fetchall()
-    messages = [message_from_row(r) for r in rows]
+    messages = [message_from_row(r) for r in within_page_budget(rows, settings.max_page_bytes)]
     return MessagesPage(
         room_id=room_id,
         messages=messages,
