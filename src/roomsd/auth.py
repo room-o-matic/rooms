@@ -6,6 +6,11 @@
   workers. They work in one room only, and the identity is `<inviter identity>/<name>`,
   e.g. `missy@local/agentd-host1.codex`. That always contains a `/` and a named
   identity never does, so an invite can't impersonate an agent.
+- A guest identity has at most one live invite at a time (enforced in create_invite),
+  so concurrent guest sessions never share an identity. Re-inviting the same name after
+  the old invite is revoked or expired keeps the same identity and room membership (the
+  way to rotate a stable guest's credential). Every query that serves an invite must
+  filter by the invite's room_id, never by identity alone.
 """
 
 import hashlib

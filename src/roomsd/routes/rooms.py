@@ -175,11 +175,12 @@ def update_room(
 @router.get("")
 def list_rooms(conn: Conn, caller: Caller, settings: SettingsDep) -> list[Room]:
     require_scope(caller, "agent", "invite")
-    rows = conn.execute(
-        "select r.* from rooms r join participants p on p.room_id = r.id"
-        " where p.agent = ? order by r.created_at desc",
-        (caller.agent,),
-    ).fetchall()
+    sql = "select r.* from rooms r join participants p on p.room_id = r.id where p.agent = ?"
+    params: list = [caller.agent]
+    if caller.scope == "invite":  # see me.updates: never trust membership alone for guests
+        sql += " and r.id = ?"
+        params.append(caller.room_id)
+    rows = conn.execute(sql + " order by r.created_at desc", params).fetchall()
     return [room_from_row(r, settings) for r in rows]
 
 
@@ -252,7 +253,14 @@ def post_message(
                 now_iso(),
             ),
         )
-        db.audit(conn, caller.agent, "message.post", room_id, message_id=cur.lastrowid)
+        db.audit(
+            conn,
+            caller.agent,
+            "message.post",
+            room_id,
+            message_id=cur.lastrowid,
+            invite_id=caller.invite_id,
+        )
     row = conn.execute("select * from messages where id = ?", (cur.lastrowid,)).fetchone()
     return message_from_row(row)
 
@@ -300,7 +308,7 @@ def put_note(
             " updated_by = excluded.updated_by, updated_at = excluded.updated_at",
             (room_id, key, value_json, caller.agent, now_iso()),
         )
-        db.audit(conn, caller.agent, "note.put", room_id, key=key)
+        db.audit(conn, caller.agent, "note.put", room_id, key=key, invite_id=caller.invite_id)
     row = conn.execute(
         "select * from notes where room_id = ? and key = ?", (room_id, key)
     ).fetchone()
@@ -351,8 +359,26 @@ def create_invite(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"ttl_seconds may not exceed {settings.max_invite_ttl_seconds}",
         )
+    identity = f"{caller.agent}/{req.name}"
     try:
         with conn:
+            # IMMEDIATE takes the write lock now, so the live-invite check and the insert
+            # are atomic across concurrent requests.
+            conn.execute("begin immediate")
+            live = conn.execute(
+                "select invite_id, room_id from invites"
+                " where agent = ? and revoked_at is null and expires_at > ?",
+                (identity, now_iso()),
+            ).fetchone()
+            if live:
+                # One live invite per guest identity, so concurrent guest sessions are
+                # always distinguishable. To renew a guest's credential (same identity, same
+                # membership), revoke the old invite first.
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    f"{identity!r} already has a live invite ({live['invite_id']} in"
+                    f" {live['room_id']}); pick another name or revoke that invite first",
+                )
             token, row = auth.create_invite(
                 conn,
                 inviter=caller.agent,
