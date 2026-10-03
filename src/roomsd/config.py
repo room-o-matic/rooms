@@ -24,7 +24,13 @@ class Settings:
     lobbyd_api_key: str | None = field(default=None, repr=False)
     lobby_heartbeat_ttl_seconds: int = 60
 
+    # docs#21: the body limit, the limit on a message's whole stored representation
+    # (body + topic + typed payload), the per-request cap enforced before JSON decoding,
+    # and the byte budget of one page of messages.
     max_message_bytes: int = 64 * 1024
+    max_message_total_bytes: int = 72 * 1024
+    max_request_bytes: int = 1024 * 1024
+    max_page_bytes: int = 4 * 1024 * 1024
     max_note_bytes: int = 256 * 1024
     default_invite_ttl_seconds: int = 3600
     max_invite_ttl_seconds: int = 24 * 3600
@@ -54,5 +60,8 @@ class Settings:
             lobbyd_jwks_url=env("LOBBYD_JWKS_URL"),
             lobbyd_api_key=env("ROOMSD_LOBBYD_API_KEY"),
             max_message_bytes=int(env("ROOMSD_MAX_MESSAGE_BYTES", 64 * 1024)),
+            max_message_total_bytes=int(env("ROOMSD_MAX_MESSAGE_TOTAL_BYTES", 72 * 1024)),
+            max_request_bytes=int(env("ROOMSD_MAX_REQUEST_BYTES", 1024 * 1024)),
+            max_page_bytes=int(env("ROOMSD_MAX_PAGE_BYTES", 4 * 1024 * 1024)),
             max_note_bytes=int(env("ROOMSD_MAX_NOTE_BYTES", 256 * 1024)),
         )

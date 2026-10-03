@@ -7,6 +7,7 @@ def read(client, room_id, headers, **params):
 
 
 def test_typed_message_round_trip(client, room_id, boostie):
+    basis = [post(client, room_id, boostie, body=f"m{i}").json()["id"] for i in range(2)]
     r = post(
         client,
         room_id,
@@ -16,7 +17,7 @@ def test_typed_message_round_trip(client, room_id, boostie):
         body="Use SQLite for v1.",
         confidence=0.85,
         reply_requested=True,
-        based_on_messages=[1, 2],
+        based_on_messages=basis,
     )
     assert r.status_code == 201
     msg = r.json()
@@ -24,8 +25,8 @@ def test_typed_message_round_trip(client, room_id, boostie):
     assert msg["type"] == "proposal"
     assert msg["confidence"] == 0.85
     assert msg["reply_requested"] is True
-    assert msg["based_on_messages"] == [1, 2]
-    assert read(client, room_id, boostie).json()["messages"] == [msg]
+    assert msg["based_on_messages"] == basis
+    assert read(client, room_id, boostie).json()["messages"][-1] == msg
 
 
 def test_unknown_type_rejected(client, room_id, boostie):
