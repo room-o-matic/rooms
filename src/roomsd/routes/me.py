@@ -19,16 +19,21 @@ def updates(
 ) -> UpdatesPage:
     """One poll for every joined room: message IDs are server-wide, so one cursor works.
 
-    Pass the returned next_cursor back as `cursor`. Invite tokens only ever see their
-    own room, because they can only join that one.
+    Pass the returned next_cursor back as `cursor`. An invite token sees only its own
+    room, enforced here by the query: identity alone is not enough, because a guest
+    identity can have stale membership in another room from an earlier invite.
     """
     require_scope(caller, "agent", "invite")
-    rows = conn.execute(
+    sql = (
         "select m.* from messages m join participants p"
         " on p.room_id = m.room_id and p.agent = ?"
-        " where m.id > ? order by m.id limit ?",
-        (caller.agent, cursor, limit),
-    ).fetchall()
+        " where m.id > ?"
+    )
+    params: list = [caller.agent, cursor]
+    if caller.scope == "invite":
+        sql += " and m.room_id = ?"
+        params.append(caller.room_id)
+    rows = conn.execute(sql + " order by m.id limit ?", [*params, limit]).fetchall()
     messages = [message_from_row(r) for r in rows]
     return UpdatesPage(
         messages=messages,
