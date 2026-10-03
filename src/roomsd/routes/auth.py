@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, HTTPException, Response, status
 
 from roomsd import db
 from roomsd.deps import Caller, Conn
@@ -22,14 +22,19 @@ def whoami(caller: Caller) -> WhoAmI:
 
 @router.post("/revoke", status_code=status.HTTP_204_NO_CONTENT)
 def revoke_self(conn: Conn, caller: Caller) -> Response:
-    """Revoke the token used for this request.
+    """Revoke the invite token used for this request.
 
     agentd calls this with a worker's invite token when the session ends, so the
-    token dies with the session rather than lingering until it expires.
+    token dies with the session rather than lingering until it expires. lobbyd access
+    tokens can't be revoked here; they expire on their own (revoke the API key in lobbyd).
     """
+    if caller.scope != "invite":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "only invite tokens can be revoked at roomsd"
+        )
     with conn:
         conn.execute(
-            "update tokens set revoked_at = ? where token_hash = ?",
+            "update invites set revoked_at = ? where token_hash = ?",
             (now_iso(), caller.token_hash),
         )
         db.audit(

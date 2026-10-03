@@ -6,7 +6,7 @@ def test_put_and_get_note(client, room_id, boostie):
     value = {"summary": "SSE preferred; polling fallback."}
     r = put(client, room_id, boostie, "summary", value)
     assert r.status_code == 200
-    assert r.json()["updated_by"] == "boostie"
+    assert r.json()["updated_by"] == "boostie@test"
 
     r = client.get(f"/v1/rooms/{room_id}/notes/summary", headers=boostie)
     assert r.json()["value"] == value
@@ -17,7 +17,7 @@ def test_put_overwrites_and_records_writer(client, room_id, boostie, missy):
     put(client, room_id, boostie, "summary", "v1")
     r = put(client, room_id, missy, "summary", "v2")
     assert r.json()["value"] == "v2"
-    assert r.json()["updated_by"] == "missy"
+    assert r.json()["updated_by"] == "missy@test"
 
 
 def test_read_notes_filters_by_keys(client, room_id, boostie):

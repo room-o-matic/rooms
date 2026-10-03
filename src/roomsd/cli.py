@@ -1,12 +1,10 @@
 import argparse
+import logging
 import os
 import sys
 import time
 
 import httpx
-
-from roomsd import auth, db
-from roomsd.config import Settings
 
 DEFAULT_URL = "http://127.0.0.1:8766"
 
@@ -14,35 +12,28 @@ DEFAULT_URL = "http://127.0.0.1:8766"
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     uvicorn.run("roomsd.app:create_app", factory=True, host=args.host, port=args.port)
     return 0
 
 
-def cmd_token_create(args: argparse.Namespace) -> int:
-    settings = Settings.from_env()
-    db.init_db(settings.db_path)
-    conn = db.connect(settings.db_path)
-    try:
-        token = auth.create_token(conn, args.agent, args.scope)
-    except ValueError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 2
-    finally:
-        conn.close()
-    print(token)
-    return 0
-
-
-def cmd_token_revoke(args: argparse.Namespace) -> int:
-    settings = Settings.from_env()
-    db.init_db(settings.db_path)
-    conn = db.connect(settings.db_path)
-    try:
-        n = auth.revoke_tokens(conn, args.agent)
-    finally:
-        conn.close()
-    print(f"revoked {n} token(s) for {args.agent}")
-    return 0
+def access_token(roomsd_url: str, explicit: str | None) -> str:
+    """An explicit token (lobbyd access token or invite), or exchange LOBBYD_API_KEY."""
+    if token := explicit or os.environ.get("ROOMSD_TOKEN"):
+        return token
+    key, lobby = os.environ.get("LOBBYD_API_KEY"), os.environ.get("LOBBYD_URL")
+    if not (key and lobby):
+        raise SystemExit(
+            "error: pass --token, set ROOMSD_TOKEN, or set LOBBYD_URL and LOBBYD_API_KEY"
+        )
+    r = httpx.post(
+        f"{lobby.rstrip('/')}/v1/token",
+        json={"audience": roomsd_url.rstrip("/")},
+        headers={"Authorization": f"Bearer {key}"},
+        timeout=10,
+    )
+    r.raise_for_status()
+    return r.json()["access_token"]
 
 
 def format_message(m: dict) -> str:
@@ -55,11 +46,9 @@ def format_message(m: dict) -> str:
 
 
 def cmd_tail(args: argparse.Namespace) -> int:
-    token = args.token or os.environ.get("ROOMSD_TOKEN")
-    if not token:
-        print("error: pass --token or set ROOMSD_TOKEN", file=sys.stderr)
-        return 2
+    token = access_token(args.url, args.token)
     after_id = args.after_id
+    refreshed = False
     with httpx.Client(
         base_url=args.url, headers={"Authorization": f"Bearer {token}"}, timeout=10
     ) as client:
@@ -70,6 +59,13 @@ def cmd_tail(args: argparse.Namespace) -> int:
                 print(f"warning: {e}; retrying", file=sys.stderr)
                 time.sleep(args.interval)
                 continue
+            exchanged = not (args.token or os.environ.get("ROOMSD_TOKEN"))
+            if r.status_code == 401 and exchanged and not refreshed:
+                # Exchanged access tokens are short-lived; get a fresh one (once).
+                client.headers["Authorization"] = f"Bearer {access_token(args.url, None)}"
+                refreshed = True
+                continue
+            refreshed = False
             if r.status_code >= 400:
                 print(f"error: {r.status_code} {r.text}", file=sys.stderr)
                 return 1
@@ -94,20 +90,10 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8766)
     serve.set_defaults(func=cmd_serve)
 
-    token = sub.add_parser("token", help="manage agent bearer tokens (local DB access)")
-    token_sub = token.add_subparsers(dest="token_command", required=True)
-    create = token_sub.add_parser("create", help="issue a token for an agent and print it")
-    create.add_argument("agent", help="agent name, or the instance_id for --scope agentd")
-    create.add_argument("--scope", choices=auth.ISSUABLE_SCOPES, default="agent")
-    create.set_defaults(func=cmd_token_create)
-    revoke = token_sub.add_parser("revoke", help="revoke all tokens for an agent")
-    revoke.add_argument("agent")
-    revoke.set_defaults(func=cmd_token_revoke)
-
     tail = sub.add_parser("tail", help="follow a room's messages")
     tail.add_argument("room_id")
     tail.add_argument("--url", default=os.environ.get("ROOMSD_URL", DEFAULT_URL))
-    tail.add_argument("--token", help="bearer token (default: $ROOMSD_TOKEN)")
+    tail.add_argument("--token", help="access or invite token (default: $ROOMSD_TOKEN)")
     tail.add_argument("--after-id", type=int, default=0)
     tail.add_argument("--interval", type=float, default=2.0, help="poll interval seconds")
     tail.add_argument("--once", action="store_true", help="print backlog and exit")

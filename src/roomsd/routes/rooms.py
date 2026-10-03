@@ -3,9 +3,10 @@ import re
 import sqlite3
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from roomsd import auth, db
+from roomsd.config import Settings
 from roomsd.deps import (
     Caller,
     Conn,
@@ -35,6 +36,7 @@ from roomsd.models import (
     RoomCreate,
     RoomCreated,
     RoomDetail,
+    RoomUpdate,
 )
 
 NOTE_KEY_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
@@ -78,46 +80,121 @@ def invite_from_row(row: sqlite3.Row) -> Invite:
     )
 
 
+def room_from_row(row: sqlite3.Row, settings: Settings) -> Room:
+    return Room(
+        id=row["id"],
+        room_url=settings.room_url(row["id"]),
+        name=row["name"],
+        purpose=row["purpose"],
+        created_by=row["created_by"],
+        created_at=row["created_at"],
+        archived_at=row["archived_at"],
+        listed=bool(row["listed"]),
+        tags=json.loads(row["tags_json"]),
+    )
+
+
+def wake_lobby_sync(request: Request) -> None:
+    """Push listing changes to lobbyd now rather than at the next heartbeat."""
+    if wake := getattr(request.app.state, "lobby_wake", None):
+        wake()
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
-def create_room(req: RoomCreate, conn: Conn, caller: Caller) -> RoomCreated:
+def create_room(
+    req: RoomCreate, request: Request, conn: Conn, caller: Caller, settings: SettingsDep
+) -> RoomCreated:
     require_scope(caller, "agent")
     assert_identity(caller, req.created_by)
     room_id = new_id("room")
     now = now_iso()
     with conn:
         conn.execute(
-            "insert into rooms (id, name, purpose, created_by, created_at) values (?, ?, ?, ?, ?)",
-            (room_id, req.name, req.purpose, caller.agent, now),
+            "insert into rooms (id, name, purpose, created_by, created_at, listed, tags_json,"
+            " listing_version) values (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                room_id,
+                req.name,
+                req.purpose,
+                caller.agent,
+                now,
+                int(req.listed),
+                json.dumps(req.tags),
+                int(req.listed),
+            ),
         )
         conn.execute(
             "insert into participants (room_id, agent, joined_at, last_seen_at)"
             " values (?, ?, ?, ?)",
             (room_id, caller.agent, now, now),
         )
-        db.audit(conn, caller.agent, "room.create", room_id, name=req.name)
-    return RoomCreated(room_id=room_id)
+        db.audit(conn, caller.agent, "room.create", room_id, name=req.name, listed=req.listed)
+    if req.listed:
+        wake_lobby_sync(request)
+    return RoomCreated(room_id=room_id, room_url=settings.room_url(room_id))
+
+
+@router.patch("/{room_id}")
+def update_room(
+    room_id: RoomId,
+    req: RoomUpdate,
+    request: Request,
+    conn: Conn,
+    caller: Caller,
+    settings: SettingsDep,
+) -> Room:
+    """The room creator may rename, re-describe, retag, and list or unlist the room."""
+    room = require_participant(conn, room_id, caller)
+    require_writable(room)
+    if caller.agent != room["created_by"]:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "only the room creator can update it")
+    changes = req.model_dump(exclude_unset=True)
+    if not changes:
+        return room_from_row(room, settings)
+    columns = {
+        "name": req.name or room["name"],
+        "purpose": req.purpose if "purpose" in changes else room["purpose"],
+        "listed": int(req.listed) if req.listed is not None else room["listed"],
+        "tags_json": json.dumps(req.tags) if req.tags is not None else room["tags_json"],
+    }
+    # Anything lobbyd shows changed while listed, or listing itself toggled: resync.
+    resync = room["listed"] or columns["listed"]
+    with conn:
+        conn.execute(
+            "update rooms set name = ?, purpose = ?, listed = ?, tags_json = ?,"
+            " listing_version = listing_version + ? where id = ?",
+            (*columns.values(), int(bool(resync)), room_id),
+        )
+        db.audit(conn, caller.agent, "room.update", room_id, **changes)
+    if resync:
+        wake_lobby_sync(request)
+    row = conn.execute("select * from rooms where id = ?", (room_id,)).fetchone()
+    return room_from_row(row, settings)
 
 
 @router.get("")
-def list_rooms(conn: Conn, caller: Caller) -> list[Room]:
+def list_rooms(conn: Conn, caller: Caller, settings: SettingsDep) -> list[Room]:
     require_scope(caller, "agent", "invite")
     rows = conn.execute(
         "select r.* from rooms r join participants p on p.room_id = r.id"
         " where p.agent = ? order by r.created_at desc",
         (caller.agent,),
     ).fetchall()
-    return [Room(**dict(r)) for r in rows]
+    return [room_from_row(r, settings) for r in rows]
 
 
 @router.get("/{room_id}")
-def get_room(room_id: RoomId, conn: Conn, caller: Caller) -> RoomDetail:
+def get_room(room_id: RoomId, conn: Conn, caller: Caller, settings: SettingsDep) -> RoomDetail:
     room = require_participant(conn, room_id, caller)
     participants = conn.execute(
         "select agent, role, joined_at, last_seen_at from participants"
         " where room_id = ? order by joined_at",
         (room_id,),
     ).fetchall()
-    return RoomDetail(**dict(room), participants=[Participant(**dict(p)) for p in participants])
+    return RoomDetail(
+        **room_from_row(room, settings).model_dump(),
+        participants=[Participant(**dict(p)) for p in participants],
+    )
 
 
 @router.post("/{room_id}/participants")
@@ -302,7 +379,7 @@ def list_invites(room_id: RoomId, conn: Conn, caller: Caller) -> list[Invite]:
     require_scope(caller, "agent")
     require_participant(conn, room_id, caller)
     rows = conn.execute(
-        "select * from tokens where room_id = ? and invite_id is not null order by created_at",
+        "select * from invites where room_id = ? order by created_at",
         (room_id,),
     ).fetchall()
     return [invite_from_row(r) for r in rows]
@@ -314,7 +391,7 @@ def revoke_invite(room_id: RoomId, invite_id: str, conn: Conn, caller: Caller) -
     require_scope(caller, "agent")
     room = require_participant(conn, room_id, caller)
     row = conn.execute(
-        "select * from tokens where invite_id = ? and room_id = ?", (invite_id, room_id)
+        "select * from invites where invite_id = ? and room_id = ?", (invite_id, room_id)
     ).fetchone()
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "invite not found")
@@ -324,9 +401,9 @@ def revoke_invite(room_id: RoomId, invite_id: str, conn: Conn, caller: Caller) -
         )
     with conn:
         conn.execute(
-            "update tokens set revoked_at = coalesce(revoked_at, ?) where invite_id = ?",
+            "update invites set revoked_at = coalesce(revoked_at, ?) where invite_id = ?",
             (now_iso(), invite_id),
         )
         db.audit(conn, caller.agent, "invite.revoke", room_id, invite_id=invite_id)
-    row = conn.execute("select * from tokens where invite_id = ?", (invite_id,)).fetchone()
+    row = conn.execute("select * from invites where invite_id = ?", (invite_id,)).fetchone()
     return invite_from_row(row)

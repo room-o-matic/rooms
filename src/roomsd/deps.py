@@ -9,6 +9,7 @@ from roomsd import auth, db
 from roomsd.auth import Principal, Scope
 from roomsd.config import Settings
 from roomsd.ids import now_iso
+from roomsd.verify import InvalidToken
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -31,10 +32,20 @@ RoomId = Annotated[str, Path(max_length=64)]
 
 
 def current_principal(
+    request: Request,
     conn: Conn,
     creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> Principal:
-    principal = auth.principal_for_token(conn, creds.credentials) if creds else None
+    principal = None
+    if creds and creds.credentials.startswith(auth.INVITE_PREFIX):
+        principal = auth.principal_for_invite(conn, creds.credentials)
+    elif creds:
+        try:
+            claims = request.app.state.verifier.verify(creds.credentials)
+        except InvalidToken:
+            pass
+        else:
+            principal = auth.principal_from_claims(claims)
     if principal is None:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,

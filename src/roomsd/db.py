@@ -11,7 +11,12 @@ create table if not exists rooms (
   purpose text,
   created_by text not null,
   created_at text not null,
-  archived_at text
+  archived_at text,
+  listed integer not null default 0,
+  tags_json text not null default '[]',
+  -- lobbyd listing sync: bumped on any listing-relevant change, synced when pushed.
+  listing_version integer not null default 0,
+  listing_synced_version integer not null default 0
 );
 
 create table if not exists participants (
@@ -45,34 +50,19 @@ create table if not exists notes (
   primary key (room_id, key)
 );
 
-create table if not exists tokens (
-  token_hash text primary key,
+create table if not exists invites (
+  invite_id text primary key,
+  token_hash text not null unique,
   agent text not null,
-  scope text not null default 'agent',
-  room_id text references rooms(id),
+  room_id text not null references rooms(id),
   role text,
-  invite_id text unique,
-  created_by text,
+  created_by text not null,
   created_at text not null,
-  expires_at text,
+  expires_at text not null,
   revoked_at text
 );
 
-create index if not exists tokens_agent on tokens(agent);
-create index if not exists tokens_room_id on tokens(room_id) where invite_id is not null;
-
-create table if not exists agentd_instances (
-  instance_id text primary key,
-  base_url text not null,
-  worker_types_json text not null,
-  profiles_json text not null,
-  max_sessions integer not null,
-  active_sessions integer not null,
-  metadata_json text,
-  registered_at text not null,
-  last_heartbeat_at text not null,
-  expires_at text not null
-);
+create index if not exists invites_room_id on invites(room_id);
 
 create table if not exists audit (
   id integer primary key autoincrement,

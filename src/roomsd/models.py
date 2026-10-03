@@ -21,10 +21,22 @@ MessageType = Literal[
 PAYLOAD_FIELDS = ("confidence", "reply_requested", "severity", "based_on_messages")
 
 
+Tags = list[str]
+
+
 class RoomCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     purpose: str | None = Field(default=None, max_length=4000)
     created_by: str | None = None
+    listed: bool = Field(default=False, description="publish name/purpose to the lobbyd directory")
+    tags: Tags = Field(default_factory=list, max_length=32)
+
+
+class RoomUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    purpose: str | None = Field(default=None, max_length=4000)
+    listed: bool | None = None
+    tags: Tags | None = Field(default=None, max_length=32)
 
 
 class Participant(BaseModel):
@@ -36,11 +48,14 @@ class Participant(BaseModel):
 
 class Room(BaseModel):
     id: str
+    room_url: str
     name: str
     purpose: str | None
     created_by: str
     created_at: str
     archived_at: str | None
+    listed: bool
+    tags: Tags
 
 
 class RoomDetail(Room):
@@ -49,6 +64,7 @@ class RoomDetail(Room):
 
 class RoomCreated(BaseModel):
     room_id: str
+    room_url: str
 
 
 class JoinRequest(BaseModel):
@@ -137,25 +153,18 @@ class InviteCreated(Invite):
     token: str
 
 
-class AgentdRegistration(BaseModel):
-    base_url: str = Field(pattern=r"^https?://", max_length=2048)
-    worker_types: list[str] = Field(min_length=1)
-    profiles: list[str] = Field(default_factory=list)
-    max_sessions: int = Field(ge=0)
-    active_sessions: int = Field(default=0, ge=0)
-    metadata: dict[str, JsonValue] | None = None
-    ttl_seconds: int | None = Field(default=None, ge=5)
+class UpdatesPage(BaseModel):
+    """New messages across every room the caller has joined on this server."""
+
+    messages: list[Message]
+    room_urls: dict[str, str] = Field(description="room_id -> room_url for rooms in messages")
+    next_cursor: int
 
 
-class AgentdInstance(BaseModel):
-    instance_id: str
+class WellKnown(BaseModel):
+    server_id: str
     base_url: str
-    worker_types: list[str]
-    profiles: list[str]
-    max_sessions: int
-    active_sessions: int
-    available_sessions: int
-    metadata: dict[str, JsonValue] | None
-    registered_at: str
-    last_heartbeat_at: str
-    expires_at: str
+    issuer: str
+    domain: str
+    version: str
+    features: list[str]

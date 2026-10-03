@@ -20,7 +20,7 @@ def test_typed_message_round_trip(client, room_id, boostie):
     )
     assert r.status_code == 201
     msg = r.json()
-    assert msg["from"] == "boostie"
+    assert msg["from"] == "boostie@test"
     assert msg["type"] == "proposal"
     assert msg["confidence"] == 0.85
     assert msg["reply_requested"] is True

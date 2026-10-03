@@ -6,8 +6,8 @@ def test_create_room_autojoins_creator(client, room_id, boostie):
     assert r.status_code == 200
     body = r.json()
     assert body["name"] == "roomsd-design"
-    assert body["created_by"] == "boostie"
-    assert [p["agent"] for p in body["participants"]] == ["boostie"]
+    assert body["created_by"] == "boostie@test"
+    assert [p["agent"] for p in body["participants"]] == ["boostie@test"]
     assert room_id.startswith("room_") and len(room_id) == len("room_") + 26
 
 
@@ -18,7 +18,7 @@ def test_list_rooms_only_shows_joined(client, room_id, boostie, missy):
 
 def test_join_sets_and_keeps_role(client, room_id, missy):
     url = f"/v1/rooms/{room_id}/participants"
-    r = client.post(url, json={"agent": "missy", "role": "implementer"}, headers=missy)
+    r = client.post(url, json={"agent": "missy@test", "role": "implementer"}, headers=missy)
     assert r.status_code == 200
     assert r.json()["role"] == "implementer"
     # Re-joining without a role keeps the existing one.
@@ -58,8 +58,8 @@ def test_actions_are_audited(client, settings, room_id, boostie, missy):
     finally:
         conn.close()
     assert [tuple(r) for r in rows] == [
-        ("boostie", "room.create"),
-        ("missy", "room.join"),
-        ("missy", "message.post"),
-        ("missy", "note.put"),
+        ("boostie@test", "room.create"),
+        ("missy@test", "room.join"),
+        ("missy@test", "message.post"),
+        ("missy@test", "note.put"),
     ]
