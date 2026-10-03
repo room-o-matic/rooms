@@ -102,6 +102,7 @@ def room_from_row(row: sqlite3.Row, settings: Settings) -> Room:
         paused=bool(row["paused"]),
         max_hops=row["max_hops"],
         message_rate_per_minute=row["message_rate_per_minute"],
+        revision=row["revision"],
     )
 
 
@@ -167,50 +168,64 @@ def update_room(
     settings: SettingsDep,
 ) -> Room:
     """Admins may rename, re-describe, retag, list or unlist, change admission, and
-    archive or unarchive the room. An archived room only accepts the unarchive."""
-    room = require_right(conn, room_id, caller, "admin")
+    archive or unarchive the room. An archived room only accepts the unarchive.
+
+    Only the fields in the request are written (docs#18), and the read, write and audit
+    happen in one transaction, so concurrent PATCHes of different fields both stick.
+    Concurrent writes to the *same* field: last writer wins, unless the request carries
+    expected_revision, in which case a stale revision gets 409. The response is the room
+    as of this request's own write (its revision says which)."""
+    require_right(conn, room_id, caller, "admin")
     changes = req.model_dump(exclude_unset=True)
-    if room["archived_at"] is not None and set(changes) != {"archived"}:
-        require_writable(room)
-    if not changes:
-        return room_from_row(room, settings)
-    archived_at = room["archived_at"]
-    if req.archived is not None:
-        archived_at = (archived_at or now_iso()) if req.archived else None
-    columns = {
-        "name": req.name or room["name"],
-        "purpose": req.purpose if "purpose" in changes else room["purpose"],
-        "listed": int(req.listed) if req.listed is not None else room["listed"],
-        "tags_json": json.dumps(req.tags) if req.tags is not None else room["tags_json"],
-        "admission": req.admission or room["admission"],
-        "default_rights_json": (
-            json.dumps(req.default_rights)
-            if req.default_rights is not None
-            else room["default_rights_json"]
-        ),
-        "archived_at": archived_at,
-        "paused": int(req.paused) if req.paused is not None else room["paused"],
-        "max_hops": req.max_hops or room["max_hops"],
-        "message_rate_per_minute": (
-            req.message_rate_per_minute
-            if "message_rate_per_minute" in changes
-            else room["message_rate_per_minute"]
-        ),
-    }
-    # Anything lobbyd shows changed while listed, or listing itself toggled: resync.
-    resync = room["listed"] or columns["listed"]
+    expected = changes.pop("expected_revision", None)
     with conn:
+        conn.execute("begin immediate")
+        room = conn.execute("select * from rooms where id = ?", (room_id,)).fetchone()
+        if expected is not None and room["revision"] != expected:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"room is at revision {room['revision']}, not {expected}; re-read and retry",
+            )
+        if room["archived_at"] is not None and set(changes) != {"archived"}:
+            require_writable(room)
+        if not changes:
+            return room_from_row(room, settings)
+        cols: dict[str, object] = {}
+        for field, column, encode in (
+            ("name", "name", None),
+            ("purpose", "purpose", None),
+            ("listed", "listed", int),
+            ("tags", "tags_json", json.dumps),
+            ("admission", "admission", None),
+            ("default_rights", "default_rights_json", json.dumps),
+            ("paused", "paused", int),
+            ("max_hops", "max_hops", None),
+            ("message_rate_per_minute", "message_rate_per_minute", None),
+        ):
+            if field in changes and not (changes[field] is None and field in NOT_NULL):
+                cols[column] = encode(changes[field]) if encode else changes[field]
+        if "archived" in changes and changes["archived"] is not None:
+            cols["archived_at"] = (
+                (room["archived_at"] or now_iso()) if changes["archived"] else None
+            )
+        # Anything lobbyd shows changed while listed, or listing itself toggled: resync.
+        listing_fields = {"name", "purpose", "tags_json", "listed"}
+        resync = bool(set(cols) & listing_fields) and bool(room["listed"] or cols.get("listed"))
+        sets = ", ".join(f"{c} = ?" for c in cols)
         conn.execute(
-            "update rooms set name = ?, purpose = ?, listed = ?, tags_json = ?, admission = ?,"
-            " default_rights_json = ?, archived_at = ?, paused = ?, max_hops = ?,"
-            " message_rate_per_minute = ?, listing_version = listing_version + ? where id = ?",
-            (*columns.values(), int(bool(resync)), room_id),
+            f"update rooms set {sets}{', ' if sets else ''}revision = revision + 1,"
+            " listing_version = listing_version + ? where id = ?",
+            (*cols.values(), int(resync), room_id),
         )
         db.audit(conn, caller.agent, "room.update", room_id, **changes)
+        row = conn.execute("select * from rooms where id = ?", (room_id,)).fetchone()
     if resync:
         wake_lobby_sync(request)
-    row = conn.execute("select * from rooms where id = ?", (room_id,)).fetchone()
     return room_from_row(row, settings)
+
+
+# Columns that can't be cleared by sending null.
+NOT_NULL = {"name", "listed", "tags", "admission", "default_rights", "paused", "max_hops"}
 
 
 @router.get("")
