@@ -37,9 +37,22 @@ class Settings:
     presence_ttl_seconds: int = 120
     max_invite_ttl_seconds: int = 24 * 3600
 
+    # docs#24: access removals are also journaled here, outside the database, and replayed
+    # after a restore. Put it on another volume to survive losing the data dir.
+    revocation_journal: Path | None = None
+    min_free_bytes: int = 64 * 1024 * 1024  # readiness fails below this much free disk
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "roomsd.sqlite"
+
+    @property
+    def backup_dir(self) -> Path:
+        return self.data_dir / "backups"
+
+    @property
+    def journal_path(self) -> Path:
+        return self.revocation_journal or self.data_dir / "revocations.jsonl"
 
     @property
     def lobby_sync_enabled(self) -> bool:
@@ -67,4 +80,5 @@ class Settings:
             max_page_bytes=int(env("ROOMSD_MAX_PAGE_BYTES", 4 * 1024 * 1024)),
             max_note_bytes=int(env("ROOMSD_MAX_NOTE_BYTES", 256 * 1024)),
             presence_ttl_seconds=int(env("ROOMSD_PRESENCE_TTL_SECONDS", 120)),
+            revocation_journal=Path(j) if (j := env("ROOMSD_REVOCATION_JOURNAL")) else None,
         )

@@ -1,8 +1,10 @@
 import argparse
+import json
 import logging
 import os
 import sys
 import time
+from pathlib import Path
 
 import httpx
 
@@ -81,6 +83,50 @@ def cmd_tail(args: argparse.Namespace) -> int:
             time.sleep(args.interval)
 
 
+def cmd_backup(args: argparse.Namespace) -> int:
+    from roomsd import recovery
+    from roomsd.config import Settings
+
+    manifest = recovery.backup(Settings.from_env(), Path(args.out))
+    print(json.dumps({k: v for k, v in manifest.items() if k != "files"}, indent=2))
+    print(
+        f"backed up {len(manifest['files'])} files to {args.out}; encrypt it before it"
+        " leaves this host",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def cmd_verify_backup(args: argparse.Namespace) -> int:
+    from roomsd import ops
+
+    try:
+        manifest = ops.verify_backup(Path(args.path))
+    except ops.BackupError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(
+        f"ok: {manifest['service']} schema v{manifest['schema_version']},"
+        f" {len(manifest['files'])} files, taken {manifest['created_at']}"
+    )
+    return 0
+
+
+def cmd_restore(args: argparse.Namespace) -> int:
+    from roomsd import ops, recovery
+    from roomsd.config import Settings
+
+    try:
+        report = recovery.restore(
+            Settings.from_env(), Path(args.source), force=args.force, id_gap=args.id_gap
+        )
+    except (ops.BackupError, ops.SchemaError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps(report, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="roomsd", description="Agent collaboration rooms")
     sub = p.add_subparsers(dest="command", required=True)
@@ -98,6 +144,24 @@ def build_parser() -> argparse.ArgumentParser:
     tail.add_argument("--interval", type=float, default=2.0, help="poll interval seconds")
     tail.add_argument("--once", action="store_true", help="print backlog and exit")
     tail.set_defaults(func=cmd_tail)
+
+    # docs#24: operate on $ROOMSD_DATA_DIR directly (stop the server before restoring).
+    b = sub.add_parser("backup", help="consistent snapshot of the database (safe while serving)")
+    b.add_argument("--out", required=True, help="new directory to write the backup into")
+    b.set_defaults(func=cmd_backup)
+    v = sub.add_parser("verify-backup", help="check a backup's checksums and integrity")
+    v.add_argument("path")
+    v.set_defaults(func=cmd_verify_backup)
+    r = sub.add_parser("restore", help="restore a backup into $ROOMSD_DATA_DIR (server stopped)")
+    r.add_argument("source", help="backup directory")
+    r.add_argument("--force", action="store_true", help="move an existing database aside")
+    r.add_argument(
+        "--id-gap",
+        type=int,
+        default=1_000_000,
+        help="advance message/audit IDs by this much past the snapshot",
+    )
+    r.set_defaults(func=cmd_restore)
     return p
 
 

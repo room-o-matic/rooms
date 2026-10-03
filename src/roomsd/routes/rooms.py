@@ -5,7 +5,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 
-from roomsd import auth, db
+from roomsd import auth, db, ops
 from roomsd.config import Settings
 from roomsd.deps import (
     RIGHTS,
@@ -703,7 +703,12 @@ def list_members(room_id: RoomId, conn: Conn, caller: Caller) -> list[Member]:
 
 @router.put("/{room_id}/members/{agent:path}")
 def grant_member(
-    room_id: RoomId, agent: str, req: MemberGrant, conn: Conn, caller: Caller
+    room_id: RoomId,
+    agent: str,
+    req: MemberGrant,
+    conn: Conn,
+    caller: Caller,
+    settings: SettingsDep,
 ) -> Member:
     """Grant or change a named agent's rights (admins only). Also lifts a ban: this is how
     an admin re-admits someone, and how a closed room admits an approved peer."""
@@ -724,6 +729,10 @@ def grant_member(
             (room_id, agent, json.dumps(sorted(set(req.rights))), caller.agent, now_iso()),
         )
         db.audit(conn, caller.agent, "member.grant", room_id, target=agent, rights=req.rights)
+    # docs#24: replayed after a restore, so a snapshot can't bring back older rights
+    ops.Journal(settings.journal_path).append(
+        "member.grant", room_id=room_id, agent=agent, rights=sorted(set(req.rights))
+    )
     row = member_row(conn, room_id, agent)
     joined = conn.execute(
         "select 1 from participants where room_id = ? and agent = ?", (room_id, agent)
@@ -737,6 +746,7 @@ def remove_member(
     agent: str,
     conn: Conn,
     caller: Caller,
+    settings: SettingsDep,
     ban: bool = False,
 ) -> Response:
     """Remove a named agent or a guest (admins only). Removal takes effect on the target's
@@ -748,6 +758,11 @@ def remove_member(
     if agent == room["created_by"]:
         raise HTTPException(status.HTTP_409_CONFLICT, "the room creator can't be removed")
     now = now_iso()
+    # docs#24: journaled before the change commits, so a crash in between errs toward
+    # keeping the access removed when a restore replays the journal.
+    ops.Journal(settings.journal_path).append(
+        "member.remove", room_id=room_id, agent=agent, ban=ban, by=caller.agent
+    )
     with conn:
         guest_prefix = agent + "/"
         conn.execute(
