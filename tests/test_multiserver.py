@@ -136,3 +136,42 @@ def test_heartbeat_payload(settings):
             {"base_url": "http://rooms-a.test", "tags": [], "ttl_seconds": 60},
         )
     ]
+
+
+# ----- docs#19: repair listings when lobbyd's view disagrees ---------------------------
+
+
+def synced_everything(client, settings, boostie, n=2):
+    ids = [create(client, boostie, name=f"pub{i}", listed=True)["room_id"] for i in range(n)]
+    FakeLobbyd().run(settings, lobby_client.sync_listings)
+    return ids
+
+
+def repushed(settings) -> int:
+    return FakeLobbyd().run(settings, lobby_client.sync_listings)
+
+
+def test_first_pass_after_start_republishes(client, settings, boostie):
+    synced_everything(client, settings, boostie)
+    assert lobby_client.reconcile(settings, {"registration_id": "r1", "listed_rooms": 2}, None)
+    assert repushed(settings) == 2
+
+
+def test_matching_view_needs_no_repair(client, settings, boostie):
+    synced_everything(client, settings, boostie)
+    view = {"registration_id": "r1", "listed_rooms": 2}
+    assert not lobby_client.reconcile(settings, view, "r1")
+    assert repushed(settings) == 0
+
+
+def test_new_registration_republishes_everything(client, settings, boostie):
+    synced_everything(client, settings, boostie)
+    assert lobby_client.reconcile(settings, {"registration_id": "r2", "listed_rooms": 0}, "r1")
+    assert repushed(settings) == 2
+
+
+def test_directory_short_of_listings_republishes(client, settings, boostie):
+    synced_everything(client, settings, boostie)
+    # same registration id, but the directory lost rows (e.g. restored from an old backup)
+    assert lobby_client.reconcile(settings, {"registration_id": "r1", "listed_rooms": 1}, "r1")
+    assert repushed(settings) == 2

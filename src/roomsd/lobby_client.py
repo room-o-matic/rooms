@@ -19,7 +19,8 @@ from roomsd.config import Settings
 log = logging.getLogger("roomsd.lobby")
 
 
-async def heartbeat(client: httpx.AsyncClient, settings: Settings) -> None:
+async def heartbeat(client: httpx.AsyncClient, settings: Settings) -> dict:
+    """Register/heartbeat; returns lobbyd's view: {registration_id, listed_rooms, …}."""
     r = await client.put(
         f"/v1/servers/roomsd/{settings.server_id}",
         json={
@@ -29,6 +30,31 @@ async def heartbeat(client: httpx.AsyncClient, settings: Settings) -> None:
         },
     )
     r.raise_for_status()
+    return r.json() if r.content else {}
+
+
+def reconcile(settings: Settings, view: dict, last_registration: str | None) -> bool:
+    """Decide whether lobbyd still holds what we think we published (docs#19). If lobbyd
+    started a new registration (endpoint migration, deletion, a replaced or wiped
+    directory) or holds fewer listings than we have listed, our local acks prove nothing:
+    mark every listed room for republishing. Returns True when a repair was scheduled."""
+    conn = db.connect(settings.db_path)
+    try:
+        local = conn.execute(
+            "select count(*) from rooms where listed = 1 and archived_at is null"
+        ).fetchone()[0]
+        changed = last_registration is not None and view.get("registration_id") != last_registration
+        short = view.get("listed_rooms", local) < local
+        if not (changed or short or last_registration is None):
+            return False
+        with conn:
+            conn.execute(
+                "update rooms set listing_synced_version = 0"
+                " where listed = 1 and archived_at is null"
+            )
+        return True
+    finally:
+        conn.close()
 
 
 async def sync_listings(client: httpx.AsyncClient, settings: Settings) -> int:
@@ -71,10 +97,16 @@ async def sync_loop(settings: Settings, wake: asyncio.Event) -> None:
         headers={"Authorization": f"Bearer {settings.lobbyd_api_key}"},
         timeout=10,
     ) as client:
+        last_registration: str | None = None
         while True:
             wake.clear()
             try:
-                await heartbeat(client, settings)
+                view = await heartbeat(client, settings)
+                # First pass after (re)start, and whenever lobbyd's registration or listing
+                # count disagrees with ours: republish the full inventory.
+                if reconcile(settings, view, last_registration):
+                    log.info("republishing listed rooms to %s", settings.lobbyd_url)
+                last_registration = view.get("registration_id")
                 await sync_listings(client, settings)
             except httpx.HTTPError as e:
                 log.warning("lobbyd sync with %s failed: %s", settings.lobbyd_url, e)
