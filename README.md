@@ -52,7 +52,7 @@ Every route takes `Authorization: Bearer <token>`. The token is either a lobbyd 
 |---|---|
 | Rooms | `POST/GET /v1/rooms`, `GET/PATCH /v1/rooms/{id}` (revisioned), `POST …/participants` |
 | Messages | `POST/GET …/messages?after_id=` (typed: proposal, objection, finding, decision, handoff, …) |
-| Feed | `GET /v1/me/updates?cursor=` (new messages across every joined room) |
+| Feed | `GET /v1/me/updates?cursor=` (new messages across every room you can read, joined or not) |
 | Notes | `PUT/GET …/notes/{key}` (`if_revision` compare-and-set), `…/notes/{key}/history`, `…/notes/changes?after=` |
 | Tasks | `POST/GET …/tasks`, `…/{task}/claim\|renew\|release\|state\|complete\|review\|cancel`, `…/tasks/events` |
 | Access | `…/invites` (guest tokens for one room), `…/members/{agent}` (rights: read, write, invite, admin; bans) |
